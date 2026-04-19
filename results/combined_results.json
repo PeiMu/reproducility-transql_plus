@@ -1,0 +1,48 @@
+{
+  "results": [
+    {
+      "system": "transql+",
+      "run_type": "warm",
+      "prompt_length": 25,
+      "prefill_latency_s": 149.30529400430774,
+      "prefill_latency_std_s": 0.9872621270111244,
+      "prefill_throughput_tok_per_s": 0.16744215378778668,
+      "decode_latency_s": 14.953039186411509,
+      "decode_latency_std_s": 0.15521263418317247,
+      "decode_throughput_tok_per_s": 0.06687603687340996,
+      "peak_rss_mb": 19625.09765625,
+      "db_size_gb": 34.7102165222168
+    },
+    {
+      "system": "llamacpp_f32",
+      "run_type": "cold",
+      "prompt_length": 25,
+      "prefill_latency_s": 99.563396878,
+      "prefill_latency_std_s": null,
+      "prefill_throughput_tok_per_s": 0.251096,
+      "decode_latency_s": null,
+      "decode_latency_std_s": null,
+      "decode_throughput_tok_per_s": null,
+      "peak_rss_mb": null,
+      "db_size_gb": null
+    },
+    {
+      "system": "llamacpp_f32",
+      "run_type": "warm",
+      "prompt_length": 25,
+      "prefill_latency_s": 1.520109739,
+      "prefill_latency_std_s": 0.003302362,
+      "prefill_throughput_tok_per_s": 16.446233,
+      "decode_latency_s": 0.9203306563982309,
+      "decode_latency_std_s": 0.0002066700781739612,
+      "decode_throughput_tok_per_s": 1.086566,
+      "peak_rss_mb": null,
+      "db_size_gb": null
+    }
+  ],
+  "perplexity": {
+    "llamacpp_f32": {
+      "perplexity": 6.2523
+    }
+  }
+}

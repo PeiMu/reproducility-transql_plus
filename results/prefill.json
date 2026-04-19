@@ -1,0 +1,33 @@
+{
+  "db_path": "weights.duckdb",
+  "db_size_gb": 34.7102165222168,
+  "num_layers": 32,
+  "chunk_size": 32,
+  "use_pivot": true,
+  "pivot_width": 32,
+  "subquery_width": 4,
+  "warmup_runs": 2,
+  "measured_runs": 3,
+  "memory_limit": "16GB",
+  "threads": 4,
+  "temp_directory": "./duckdb_tmp",
+  "results": [
+    {
+      "prompt_length": 25,
+      "prefill_latencies_s": [
+        149.69370577298105,
+        150.27250190696213,
+        147.94967433298007
+      ],
+      "prefill_latency_mean_s": 149.30529400430774,
+      "prefill_latency_std_s": 0.9872621270111244,
+      "prefill_throughput_tok_per_s": 0.16744215378778668,
+      "pivot_setup_time_s": 122.93876320996787,
+      "peak_rss_mb": 18752.82421875,
+      "num_layers": 32,
+      "step_count": 225,
+      "warmup_runs": 2,
+      "measured_runs": 3
+    }
+  ]
+}

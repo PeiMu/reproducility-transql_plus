@@ -1,0 +1,41 @@
+{
+  "config": {
+    "db_path": "weights.duckdb",
+    "prompts_dir": "prompts",
+    "num_layers": 1,
+    "chunk_size": 32,
+    "pivot_width": 32,
+    "subquery_width": 4,
+    "lengths": [
+      25
+    ],
+    "warmup": 0,
+    "measure": 1,
+    "memory_limit": "16GB",
+    "threads": 4,
+    "temp_directory": "./duckdb_tmp",
+    "output": "results/bench_d11_overhead.json"
+  },
+  "results": {
+    "25": {
+      "A_fusion_on": {
+        "pivot_s": 46.8926317919977,
+        "prefill_s": 11.291711163998116,
+        "d11_s": 0.0017203380120918155,
+        "decode_mean_s": 1.0318588980007917,
+        "decode_std_s": 0.0,
+        "session_total_s": 12.325290400011,
+        "num_decode_steps": 1
+      },
+      "B_fusion_off": {
+        "pivot_s": 60.147370854974724,
+        "prefill_s": 8.659494635998271,
+        "d11_s": 8.678005542606115e-06,
+        "decode_mean_s": 1.0310349260107614,
+        "decode_std_s": 0.0,
+        "session_total_s": 9.690538240014575,
+        "num_decode_steps": 1
+      }
+    }
+  }
+}

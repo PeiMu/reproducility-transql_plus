@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transql-plus"
+version = "0.1.0"
+description = "Reproduction of TranSQL+ (arxiv 2502.02818)"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=1.5.2",
+    "numpy",
+]
+
+[project.optional-dependencies]
+weights = ["torch", "transformers", "onnx", "onnxsim"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["transql_plus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
