@@ -1,13 +1,19 @@
 """
-collect_results.py — Aggregate TranSQL+ and llama.cpp evaluation results.
+collect_results.py — Aggregate TranSQL+ (DuckDB + ClickHouse) and
+llama.cpp / DeepSpeed evaluation results.
 
 Reads (in --results-dir):
-  - prefill.json                TranSQL+ prefill (warm mean +/- std)
-  - decode.json                 TranSQL+ decode (warm mean +/- std)
-  - transql_ppl.json            TranSQL+ perplexity
-  - llamacpp_f32_cold.json      llama-bench -o json, cold start (-r 1 --no-warmup)
-  - llamacpp_f32_warm.json      llama-bench -o json, warm (-r 3)
+  - prefill.json                TranSQL+ (DuckDB) prefill (warm)
+  - decode.json                 TranSQL+ (DuckDB) decode (warm)
+  - transql_ppl.json            TranSQL+ (DuckDB) perplexity
+  - clickhouse_prefill.json     TranSQL+ (ClickHouse) prefill (warm)
+  - clickhouse_decode.json      TranSQL+ (ClickHouse) decode (warm)
+  - clickhouse_ppl.json         TranSQL+ (ClickHouse) perplexity
+  - llamacpp_f32_cold.json      llama-bench -o json, cold start
+  - llamacpp_f32_warm.json      llama-bench -o json, warm
   - llamacpp_f32_ppl.txt        llama-perplexity stdout
+  - deepspeed_bf16_cold.json     DeepSpeed cold (cache dropped externally)
+  - deepspeed_bf16_warm.json     DeepSpeed warm
 
 Writes:
   - combined_results.json       one row per (system, run_type, prompt_length)
@@ -94,6 +100,79 @@ def load_transql(results_dir):
                             d.get("peak_rss_mb") or 0) or None,
             db_size_gb=db_size_gb,
         ))
+    return entries
+
+
+def load_clickhouse(results_dir):
+    """TranSQL+ on ClickHouse. Same file layout as load_transql but under
+    ``clickhouse_*.json`` filenames and tagged ``system='transql+/ch'``
+    so the two backends sit side-by-side in the comparison table."""
+    entries = []
+    prefill_path = os.path.join(results_dir, "clickhouse_prefill.json")
+    decode_path = os.path.join(results_dir, "clickhouse_decode.json")
+
+    prefill_by_len = {}
+    db_size_gb = None
+    if os.path.exists(prefill_path):
+        with open(prefill_path) as f:
+            pdata = json.load(f)
+        db_size_gb = pdata.get("db_size_gb")
+        for r in pdata.get("results", []):
+            prefill_by_len[r["prompt_length"]] = r
+
+    decode_by_len = {}
+    if os.path.exists(decode_path):
+        with open(decode_path) as f:
+            ddata = json.load(f)
+        for r in ddata.get("results", []):
+            decode_by_len[r["prompt_length"]] = r
+
+    for length in sorted(set(prefill_by_len) | set(decode_by_len)):
+        p = prefill_by_len.get(length, {})
+        d = decode_by_len.get(length, {})
+        entries.append(_entry(
+            system="transql+/ch",
+            run_type="warm",
+            prompt_length=length,
+            prefill_latency_s=p.get("prefill_latency_mean_s"),
+            prefill_latency_std_s=p.get("prefill_latency_std_s"),
+            prefill_throughput_tok_per_s=p.get("prefill_throughput_tok_per_s"),
+            decode_latency_s=d.get("decode_latency_mean_s"),
+            decode_latency_std_s=d.get("decode_latency_std_s"),
+            decode_throughput_tok_per_s=d.get("decode_throughput_tok_per_s"),
+            peak_rss_mb=max(p.get("peak_rss_mb") or 0,
+                            d.get("peak_rss_mb") or 0) or None,
+            db_size_gb=db_size_gb,
+        ))
+    return entries
+
+
+def load_deepspeed(results_dir, variant="bf16"):
+    """DeepSpeed baseline. One JSON per run_type, each carrying a list of
+    per-length results with both prefill and decode stats."""
+    entries = []
+    for run_type in ("cold", "warm"):
+        path = os.path.join(results_dir,
+                            f"deepspeed_{variant}_{run_type}.json")
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            data = json.load(f)
+        for r in data.get("results", []):
+            entries.append(_entry(
+                system=f"deepspeed_{variant}",
+                run_type=run_type,
+                prompt_length=r.get("prompt_length"),
+                prefill_latency_s=r.get("prefill_latency_mean_s"),
+                prefill_latency_std_s=r.get("prefill_latency_std_s"),
+                prefill_throughput_tok_per_s=r.get(
+                    "prefill_throughput_tok_per_s"),
+                decode_latency_s=r.get("decode_latency_mean_s"),
+                decode_latency_std_s=r.get("decode_latency_std_s"),
+                decode_throughput_tok_per_s=r.get(
+                    "decode_throughput_tok_per_s"),
+                peak_rss_mb=r.get("peak_rss_mb"),
+            ))
     return entries
 
 
@@ -203,6 +282,11 @@ def load_perplexity(results_dir):
         with open(transql_path) as f:
             ppl["transql+"] = json.load(f)
 
+    ch_ppl = os.path.join(results_dir, "clickhouse_ppl.json")
+    if os.path.exists(ch_ppl):
+        with open(ch_ppl) as f:
+            ppl["transql+/ch"] = json.load(f)
+
     for variant in ["f32"]:
         v = _parse_llama_perplexity_text(
             os.path.join(results_dir, f"llamacpp_{variant}_ppl.txt"))
@@ -234,7 +318,8 @@ def print_table(entries, perplexity):
         return None
 
     print("\n" + "=" * (10 + col_w * len(sys_keys)))
-    print("  TranSQL+ vs llama.cpp — prefill / decode comparison")
+    print("  TranSQL+ (DuckDB/ClickHouse) vs llama.cpp / DeepSpeed"
+          " — prefill / decode comparison")
     print("=" * (10 + col_w * len(sys_keys)))
 
     header = f"{'Prompt':>10}" + "".join(f"{l:>{col_w}}" for l in labels)
@@ -294,8 +379,11 @@ def main():
     args = parser.parse_args()
 
     transql_entries = load_transql(args.results_dir)
+    clickhouse_entries = load_clickhouse(args.results_dir)
     llamacpp_entries = load_llamacpp(args.results_dir, variant="f32")
-    all_entries = transql_entries + llamacpp_entries
+    deepspeed_entries = load_deepspeed(args.results_dir, variant="bf16")
+    all_entries = (transql_entries + clickhouse_entries
+                   + llamacpp_entries + deepspeed_entries)
     perplexity = load_perplexity(args.results_dir)
 
     print_table(all_entries, perplexity)

@@ -1,0 +1,151 @@
+{
+  "server_version": "26.3.9.8",
+  "host": "localhost",
+  "port": 8123,
+  "constructs": [
+    {
+      "name": "list_dot_product",
+      "duckdb_form": "list_dot_product(a, b)",
+      "status": "workaround",
+      "clickhouse_form": "dotProduct(a, b)",
+      "probe_sql": "SELECT dotProduct([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])",
+      "error": null,
+      "notes": "ClickHouse has a native dotProduct() over Array(Float32)."
+    },
+    {
+      "name": "list_sum",
+      "duckdb_form": "list_sum(arr)",
+      "status": "workaround",
+      "clickhouse_form": "arraySum(arr)",
+      "probe_sql": "SELECT arraySum([1.0, 2.0, 3.0])",
+      "error": null,
+      "notes": ""
+    },
+    {
+      "name": "len_array",
+      "duckdb_form": "len(arr)",
+      "status": "workaround",
+      "clickhouse_form": "length(arr)",
+      "probe_sql": "SELECT length([1.0, 2.0, 3.0])",
+      "error": null,
+      "notes": ""
+    },
+    {
+      "name": "list_transform_lambda",
+      "duckdb_form": "list_transform(v, x -> x*x)",
+      "status": "workaround",
+      "clickhouse_form": "arrayMap(x -> x*x, v)",
+      "probe_sql": "SELECT arrayMap(x -> x * x, [1.0, 2.0, 3.0])",
+      "error": null,
+      "notes": ""
+    },
+    {
+      "name": "list_transform_over_range",
+      "duckdb_form": "list_transform(generate_series(1, N), i -> expr)",
+      "status": "workaround",
+      "clickhouse_form": "arrayMap(i -> expr, range(1, N+1))",
+      "probe_sql": "SELECT arrayMap(i -> i * 2, range(1, 4))",
+      "error": null,
+      "notes": "ClickHouse range(a,b) is exclusive on b; DuckDB generate_series(a,b) is inclusive. Add +1 in the rewrite."
+    },
+    {
+      "name": "generate_series",
+      "duckdb_form": "generate_series(a, b)  (inclusive)",
+      "status": "workaround",
+      "clickhouse_form": "range(a, b+1)  (exclusive upper)",
+      "probe_sql": "SELECT range(0, 5)",
+      "error": null,
+      "notes": ""
+    },
+    {
+      "name": "unnest_generate_series",
+      "duckdb_form": "unnest(generate_series(0, N-1))",
+      "status": "workaround",
+      "clickhouse_form": "arrayJoin(range(0, N))",
+      "probe_sql": "SELECT arrayJoin(range(0, 4)) AS i",
+      "error": null,
+      "notes": ""
+    },
+    {
+      "name": "array_agg_ordered",
+      "duckdb_form": "array_agg(val ORDER BY k)",
+      "status": "workaround",
+      "clickhouse_form": "(SELECT groupArray(val) FROM (... ORDER BY k))  -- push ORDER BY into subquery",
+      "probe_sql": "SELECT groupArray(val) FROM (SELECT arrayJoin([3, 1, 2]) AS val ORDER BY val)",
+      "error": null,
+      "notes": "ClickHouse has no ORDER BY inside aggregate; must sort in a subquery first. In TranSQL+ this shows up in ROW2COL re-chunking (sql_templates.py L102, L373)."
+    },
+    {
+      "name": "fixed_length_array_type",
+      "duckdb_form": "FLOAT[4]",
+      "status": "unsupported",
+      "clickhouse_form": "Array(Float32)  -- variable only; no fixed length",
+      "probe_sql": "CREATE TABLE _probe_fixed_arr (v Array(Float32, 4)) ENGINE=Memory",
+      "error": "Received ClickHouse exception, code: 42, server response: Code: 42. DB::Exception: Array data type family must have exactly one argument - type of elements. (NUMBER_OF_ARGUMENTS_DOESNT_MATCH) (for url http://localhost:8123)",
+      "notes": "ClickHouse Arrays are variable-length. Fixed size is not enforced at the type level; enforce in loader instead. Operationally equivalent since all rows written at a given chunk_size are the same length."
+    },
+    {
+      "name": "variable_length_array_type",
+      "duckdb_form": "FLOAT[]",
+      "status": "workaround",
+      "clickhouse_form": "Array(Float32)",
+      "probe_sql": "CREATE TABLE _probe_var_arr (v Array(Float32)) ENGINE=Memory",
+      "error": null,
+      "notes": ""
+    },
+    {
+      "name": "pivot",
+      "duckdb_form": "PIVOT tbl ON chunk_index USING first(v) GROUP BY row_index",
+      "status": "unsupported",
+      "clickhouse_form": "SELECT row_index,\n  (groupArrayIf(v, chunk_index=0))[1] AS c0,\n  (groupArrayIf(v, chunk_index=1))[1] AS c1,\n  ...\nFROM tbl GROUP BY row_index",
+      "probe_sql": "PIVOT _probe_pivot_src ON chunk_index USING first(v)",
+      "error": "Received ClickHouse exception, code: 62, server response: Code: 62. DB::Exception: Syntax error: failed at position 1 (PIVOT) (line 1, col 1): PIVOT _probe_pivot_src ON chunk_index USING first(v)",
+      "notes": "Core paper post-opt \u00a74.3. Must emit explicit groupArrayIf column per chunk_index in postopt_ch.py. Cost scales with num_chunks; same as DuckDB's PIVOT at runtime."
+    },
+    {
+      "name": "positional_join",
+      "duckdb_form": "a POSITIONAL JOIN b",
+      "status": "unsupported",
+      "clickhouse_form": "Fold neighbour tables into the same SELECT as multiple computed columns (preferred), or align by rowNumberInAllBlocks() as a secondary workaround.",
+      "probe_sql": "SELECT * FROM _probe_pj_a POSITIONAL JOIN _probe_pj_b",
+      "error": "Received ClickHouse exception, code: 62, server response: Code: 62. DB::Exception: Syntax error: failed at position 63 (Native) (line 2, col 9): Native. Expected end of query. (SYNTAX_ERROR) (for url http://localhost:8123)",
+      "notes": "In postopt.py POSITIONAL JOIN is used to SUM partial dot-products. We rewrite as a single SELECT with multiple SUM(...)_i expressions and sum them inline; the join disappears."
+    },
+    {
+      "name": "create_temp_table",
+      "duckdb_form": "CREATE TEMP TABLE t AS SELECT ...",
+      "status": "workaround",
+      "clickhouse_form": "CREATE TEMPORARY TABLE t ENGINE=Memory AS SELECT ...",
+      "probe_sql": "CREATE TEMPORARY TABLE _probe_tmp ENGINE=Memory AS SELECT 1 AS x",
+      "error": null,
+      "notes": "ClickHouse requires explicit ENGINE=Memory for TEMPORARY."
+    },
+    {
+      "name": "create_or_replace_temp_table",
+      "duckdb_form": "CREATE OR REPLACE TEMP TABLE t AS SELECT ...",
+      "status": "unsupported",
+      "clickhouse_form": "DROP TEMPORARY TABLE IF EXISTS t; CREATE TEMPORARY TABLE t ENGINE=Memory AS SELECT ...",
+      "probe_sql": "CREATE OR REPLACE TEMPORARY TABLE _probe_cor ENGINE=Memory AS SELECT 1",
+      "error": null,
+      "notes": "Two-statement replacement must be issued as separate queries."
+    },
+    {
+      "name": "duckdb_tables",
+      "duckdb_form": "SELECT table_name FROM duckdb_tables() WHERE temporary = true",
+      "status": "workaround",
+      "clickhouse_form": "SELECT name FROM system.tables WHERE is_temporary = 1",
+      "probe_sql": "SELECT name FROM system.tables WHERE is_temporary = 1",
+      "error": null,
+      "notes": ""
+    },
+    {
+      "name": "cast_float",
+      "duckdb_form": "CAST(x AS FLOAT)",
+      "status": "workaround",
+      "clickhouse_form": "CAST(x AS Float32)  -- or toFloat32(x)",
+      "probe_sql": "SELECT CAST(1.0 AS Float32)",
+      "error": null,
+      "notes": ""
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # TranSQL+ Reproduction (arxiv 2502.02818)
 
-Independent reproduction of the TranSQL+ paper: running LLM inference entirely inside a relational database (DuckDB).
+Independent reproduction of the TranSQL+ paper: running LLM inference entirely inside a relational database. Primary backend is DuckDB; Step 4B ports the same SQL pipeline to ClickHouse (paper-portability claim). Step 5 adds two native-inference baselines (llama.cpp, DeepSpeed).
 
 ## Setup
 
@@ -116,6 +116,20 @@ This runs synthetic MatMuls at all four Llama3-8B projection shapes (Q/O, K/V, g
 
 `chunk_size` must match your stored `weights.duckdb` (default 32 for the reproduction). To compare 32 vs 64 theoretically, re-run with `--chunk-size 64` — but actually using `chunk_size=64` requires rebuilding `weights.duckdb` from scratch via `preprocessing/preprocess_weights.py`.
 
+#### ClickHouse variant — only `pivot_width` is tunable
+
+On ClickHouse there is no `POSITIONAL JOIN`, so the §4.3 rewrite collapses the whole per-chunk dot-product into a single `SELECT` (see `transql_plus/clickhouse/postopt_ch.py::pivoted_matmul_sql`). `subquery_width` becomes a no-op — accepted for CLI parity but ignored. Only `pivot_width` needs tuning:
+
+```bash
+python scripts/tune_pivot_clickhouse.py \
+    --ch-host localhost --ch-port 8123 --ch-database default \
+    --chunk-size 32 --max-threads 4 \
+    --lengths 25,50,100,200 \
+    --max-memory-usage 16GB
+```
+
+Mirrors `run_clickhouse_prefill.py`: same D9 weight-pivot cache, §4.1 CTE merge, `should_pivot` heuristic, and session settings. Prints per-matrix bests plus a global recommendation; pass it to every ClickHouse benchmark via `--pivot-width X` (drop `--subquery-width` entirely — it is ignored).
+
 **Weight pivot caching** (Decision D9): as of the current revision, `runner.py` caches pivoted weights as TEMP TABLEs across inference runs for **any** `pivot_width` value (including multi-group `_piv_g{N}` schemas). The one-time pivot cost is reported as `pivot_setup_time_s` in the output JSON and printed at the start of each measurement — it is not counted in the per-run latency. See `scripts/bench_pivot_cache.py` for the benchmark that justifies this (192× per-run speedup, break-even at ~1.2 runs).
 
 ### Note — decode × QKV fusion fix (D11)
@@ -166,7 +180,7 @@ python scripts/run_prefill.py \
     --warmup 0 --repeat 1 \
     --memory-limit 16GB --threads 4 \
     --temp-directory ./duckdb_tmp \
-    --pivot-width X --subquery-width Y
+    --pivot-width 32 --subquery-width 4
 
 # Smoke test decode (1 layer, 1 step, no warmup)
 python scripts/run_decode.py \
@@ -176,7 +190,7 @@ python scripts/run_decode.py \
     --warmup 0 --decode-steps 1 \
     --memory-limit 16GB --threads 4 \
     --temp-directory ./duckdb_tmp \
-    --pivot-width X --subquery-width Y
+    --pivot-width 32 --subquery-width 4
 
 # Smoke test perplexity (1 layer, 1 chunk, seq_len=25 to match the others)
 python scripts/run_perplexity.py \
@@ -186,7 +200,7 @@ python scripts/run_perplexity.py \
     --context-len 25 \
     --memory-limit 16GB --threads 4 \
     --temp-directory ./duckdb_tmp \
-    --pivot-width X --subquery-width Y
+    --pivot-width 32 --subquery-width 4
 ```
 
 ## Step 4: Full Benchmarks (32 layers)
@@ -209,7 +223,7 @@ python scripts/run_prefill.py \
     --db-path weights.duckdb \
     --prompts-dir prompts \
     --output results/prefill.json \
-    --pivot-width X --subquery-width Y \
+    --pivot-width 32 --subquery-width 4 \
     --lengths 25 50 100 200 \
     --memory-limit 16GB --threads 4 \
     --temp-directory ./duckdb_tmp
@@ -224,7 +238,7 @@ python scripts/run_decode.py \
     --db-path weights.duckdb \
     --prompts-dir prompts \
     --output results/decode.json \
-    --pivot-width X --subquery-width Y \
+    --pivot-width 32 --subquery-width 4 \
     --lengths 25 50 100 200 \
     --memory-limit 16GB --threads 4 \
     --temp-directory ./duckdb_tmp
@@ -236,7 +250,7 @@ python scripts/run_decode.py \
 python scripts/run_perplexity.py \
     --db-path weights.duckdb \
     --output results/transql_ppl.json \
-    --pivot-width X --subquery-width Y \
+    --pivot-width 32 --subquery-width 4 \
     --max-chunks 64 \
     --memory-limit 16GB --threads 4 \
     --temp-directory ./duckdb_tmp
@@ -260,7 +274,81 @@ python scripts/run_decode.py \
     --temp-directory ./duckdb_tmp
 ```
 
-## Step 5: llama.cpp Baseline
+## Step 4B: TranSQL+ on ClickHouse (paper-portability)
+
+Ports the same TranSQL+ pipeline to ClickHouse to demonstrate the paper's claim that the approach is not DuckDB-specific. The code lives in a parallel subpackage — `transql_plus/clickhouse/` — and the frozen DuckDB path in Step 4 is untouched.
+
+See `reproduction_note.md` D12 for the full dialect gap table (paper's DuckDB-only constructs rewritten for ClickHouse: `PIVOT` → `groupArrayIf`, `POSITIONAL JOIN` collapsed to one `SELECT`, `list_dot_product` → `dotProduct`, etc.) and `results/clickhouse_sql_probe.json` for the raw probe output.
+
+### Bring up ClickHouse (Docker)
+
+```bash
+docker run -d -p 9000:9000 -p 8123:8123 --name ch_transql \
+    --ulimit nofile=262144:262144 \
+    -e CLICKHOUSE_SKIP_USER_SETUP=1 \
+    clickhouse/clickhouse-server:latest
+
+pip3 install clickhouse-connect
+```
+
+The `CLICKHOUSE_SKIP_USER_SETUP=1` flag leaves the `default` user passwordless so the scripts can connect over HTTP on 8123 without credential setup — acceptable here because the container only binds to localhost.
+
+### (Optional) Re-run the dialect probe
+
+```bash
+python scripts/probe_clickhouse_sql.py \
+    --ch-host localhost --ch-port 8123 \
+    --output results/clickhouse_sql_probe.json
+```
+
+Populates `results/clickhouse_sql_probe.json` with one row per construct (status ∈ {`supported`, `workaround-exists`, `unsupported`}). D12's gap table is generated from this output.
+
+### Load weights into ClickHouse
+
+Reuses the chunked CSVs under `weights_csv/` — no re-preprocessing needed. Loads take ~3 min for 32 layers (CSVs streamed via `CSVWithNames`):
+
+```bash
+python -m preprocessing.load_weights_clickhouse \
+    --csv-dir weights_csv \
+    --ch-host localhost --ch-port 8123 --ch-database default \
+    --chunk-size 32 --num-layers 32
+```
+
+### Benchmarks (same protocol as Step 4)
+
+```bash
+# Prefill: 2 warmup + 3 measured runs per prompt length
+python scripts/run_clickhouse_prefill.py \
+    --ch-host localhost --ch-port 8123 --ch-database default \
+    --prompts-dir prompts \
+    --output results/clickhouse_prefill.json \
+    --lengths 25 50 100 200 \
+    --max-memory-usage 16GB --max-threads 4 \
+    --pivot-width 32
+
+# Decode: 2 warmup + 49 measured decode steps
+python scripts/run_clickhouse_decode.py \
+    --ch-host localhost --ch-port 8123 --ch-database default \
+    --prompts-dir prompts \
+    --output results/clickhouse_decode.json \
+    --lengths 25 50 100 200 \
+    --max-memory-usage 16GB --max-threads 4 \
+    --pivot-width 32
+
+# Perplexity on WikiText-2
+python scripts/run_clickhouse_perplexity.py \
+    --ch-host localhost --ch-port 8123 --ch-database default \
+    --output results/clickhouse_ppl.json \
+    --max-chunks 64 \
+    --max-memory-usage 16GB --max-threads 4 \
+    --pivot-width 32
+```
+
+`--max-memory-usage 16GB` (accepts raw bytes or `K`/`M`/`G`/`T` suffix, 1024-based to match DuckDB's `memory_limit`) and `--max-threads 4` match the paper's c7.2xlarge hardware profile (same envelope used for DuckDB in Step 4).
+
+## Step 5: Baselines
+
+### Step 5A: llama.cpp
 
 The paper states "the models used here are unquantized full-precision", so we compare against llama.cpp F32 only (no quantization). **Run llama.cpp under the same 4-core / 16 GB constraint** for an apples-to-apples comparison.
 
@@ -322,6 +410,33 @@ If `systemd-run` is unavailable (containers, macOS), drop the `systemd-run ... -
 
 **Storage caveat.** The paper's AWS c7.2xlarge uses network-attached EBS gp3 at ~125 MB/s baseline; a local SATA SSD (~500 MB/s) or NVMe (~3 GB/s) is much faster, so absolute latencies will not match the paper's figures. The *ratio* between TranSQL+ and llama.cpp on the same host is still a fair reproduction of the paper's claim. See `reproduction_note.md` → "llama.cpp Baseline: Settings Parity & Storage Analysis" for the full analysis and the reason we do not add an `IOReadBandwidthMax` throttle.
 
+### Step 5B: DeepSpeed
+
+A second inference-framework baseline (v1 `init_inference` API, CPU BF16; DeepSpeed CPU accelerator does not support float16). Mirrors Step 5A's cold/warm protocol — the script does not drop caches itself; the user drops the page cache before the cold run. Same 4-thread / 16 GiB envelope as all other measurements.
+
+```bash
+# Editable install against the local 0.18.9 checkout
+pip3 install -e /home/pei/Project/DeepSpeed
+
+# --- Cold run (drop page cache, then launch under 16 GiB cgroup) ------
+sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+
+systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
+    python scripts/run_deepspeed.py --cold \
+    --threads 4 \
+    --lengths 25 50 100 200 \
+    --output results/deepspeed_bf16_cold.json
+
+# --- Warm run (same-process warmup, no cache drop) --------------------
+systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
+    python scripts/run_deepspeed.py \
+    --threads 4 \
+    --lengths 25 50 100 200 \
+    --output results/deepspeed_bf16_warm.json
+```
+
+One invocation produces both prefill (2 warmup + 3 measured) and decode (2 warmup + 49 measured) numbers at every prompt length. If `systemd-run` is unavailable, drop the `systemd-run ... --` prefix — `--threads 4` (propagated to `torch.set_num_threads` + `OMP_NUM_THREADS`) still pins thread count, but RAM is unconstrained; note that when reporting.
+
 ## Step 6: Aggregate and Compare
 
 Once Steps 4 and 5 have populated `results/`, produce a single side-by-side table. Run from the project root so the default paths resolve to this directory's `results/`:
@@ -332,18 +447,20 @@ python scripts/collect_results.py --results-dir results
 ```
 
 **Inputs** (read from `results/`):
-- `prefill.json`, `decode.json`, `transql_ppl.json` — TranSQL+ (Step 4)
-- `llamacpp_f32_cold.json`, `llamacpp_f32_warm.json` — llama-bench `-o json` (Step 5)
-- `llamacpp_f32_ppl.txt` — llama-perplexity text output (Step 5)
+- `prefill.json`, `decode.json`, `transql_ppl.json` — TranSQL+ on DuckDB (Step 4)
+- `clickhouse_prefill.json`, `clickhouse_decode.json`, `clickhouse_ppl.json` — TranSQL+ on ClickHouse (Step 4B)
+- `llamacpp_f32_cold.json`, `llamacpp_f32_warm.json` — llama-bench `-o json` (Step 5A)
+- `llamacpp_f32_ppl.txt` — llama-perplexity text output (Step 5A)
+- `deepspeed_bf16_cold.json`, `deepspeed_bf16_warm.json` — DeepSpeed (Step 5B)
 
 **Output** (written to `results/`):
 - `combined_results.json` — unified schema, one row per `(system, run_type, prompt_length)`
 
-The script also prints a comparison table to stdout with one column per `(system, run_type)` — e.g. `transql+/warm`, `llamacpp_f32/cold`, `llamacpp_f32/warm` — for prefill/decode latency, throughput, peak RSS, and perplexity.
+The script also prints a comparison table to stdout with one column per `(system, run_type)` — e.g. `transql+/warm`, `transql+/ch/warm`, `llamacpp_f32/cold`, `llamacpp_f32/warm`, `deepspeed_bf16/cold`, `deepspeed_bf16/warm` — for prefill/decode latency, throughput, peak RSS, and perplexity.
 
 Notes:
 - Rows missing from any input file show `--`; the script is resilient to partial runs.
-- llama-bench does not report peak RSS in its JSON, so that column is populated only for TranSQL+.
+- llama-bench does not report peak RSS in its JSON, so that column is populated only for the two TranSQL+ backends and DeepSpeed.
 - llama.cpp decode is measured from empty context (`-n 50` with `n_prompt=0` in its model); the single tg value is broadcast to every prompt length in the table. This is standard practice when comparing llama-bench numbers — see `reproduction_note.md` → "llama.cpp Baseline".
 - To write the combined JSON elsewhere, pass `--output /path/to/file.json`.
 
@@ -379,23 +496,31 @@ Shows that the paper's 2-step softmax (`exp, SUM, div`) overflows for `max(score
 ## Project Structure
 
 ```
-transql_plus/           # Core library (Sections 3-4)
+transql_plus/           # Core library (Sections 3-4) — DuckDB path, frozen
   config.py             # Model configuration (D6: no magic numbers)
   sql_templates.py      # SQL code generation (Section 3.2, Table 1)
   compute_dag.py        # Computation DAG (Section 3.2)
   dag_to_sql.py         # DAG to SQL expansion (Section 3.2)
   postopt.py            # Post-optimisations (Section 4)
   runner.py             # Inference runner (Section 5)
+  clickhouse/           # ClickHouse dialect port (§D12, parallel subpackage)
+    sql_templates_ch.py # ClickHouse templates (dotProduct, arrayMap, ...)
+    postopt_ch.py       # CTE merge + fusion + pivot rewrites (§4.1–4.3)
+    runner_ch.py        # ClickHouseRunner (same public API as TranSQLRunner)
 
 preprocessing/          # Weight preprocessing (Section 3.1)
   extract_weights.py    # Extract from PyTorch/ONNX + constant folding
   preprocess_weights.py # Algorithm 1: matrix to chunked relational tables
-  load_weights_duckdb.py # Load chunked CSV into DuckDB
+  load_weights_duckdb.py  # Load chunked CSV into DuckDB
+  load_weights_clickhouse.py  # Load chunked CSV into ClickHouse (MergeTree)
 
 scripts/                # Measurement and utilities
-  run_prefill.py        # Prefill benchmark
-  run_decode.py         # Decode benchmark with KV cache
-  run_perplexity.py     # WikiText-2 perplexity
+  run_prefill.py        # Prefill benchmark (DuckDB)
+  run_decode.py         # Decode benchmark with KV cache (DuckDB)
+  run_perplexity.py     # WikiText-2 perplexity (DuckDB)
+  run_clickhouse_{prefill,decode,perplexity}.py  # ClickHouse counterparts
+  probe_clickhouse_sql.py  # Dialect probe feeding D12 gap table
+  run_deepspeed.py      # DeepSpeed baseline (both prefill and decode)
   sample_prompts.py     # Prompt sampling from LMSys-Chat-1M
   tune_pivot.py         # ROW2COL pivot width tuning (§4.3)
   bench_pivot_cache.py  # D9 weight-pivot cache microbenchmark
@@ -412,5 +537,5 @@ tests/                  # 49 tests
 ## Design Decisions
 
 All design decisions are documented in:
-- `reproduction_note.md` — Decisions D1-D10, measurement protocol, known issues
+- `reproduction_note.md` — Decisions D1-D12, measurement protocol, known issues (D12 covers the ClickHouse dialect port in Step 4B)
 - `comparison_analysis.md` — Gap analysis: reproduction vs AQP_middleware vs paper

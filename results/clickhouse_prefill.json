@@ -1,0 +1,34 @@
+{
+  "ch_host": "localhost",
+  "ch_port": 8123,
+  "ch_database": "default",
+  "db_size_gb": 20.150316542945802,
+  "num_layers": 32,
+  "chunk_size": 32,
+  "use_pivot": true,
+  "pivot_width": 32,
+  "subquery_width": 0,
+  "warmup_runs": 2,
+  "measured_runs": 3,
+  "max_memory_usage": 17179869184,
+  "max_threads": 4,
+  "results": [
+    {
+      "prompt_length": 25,
+      "prefill_latencies_s": [
+        554.6721927560284,
+        553.1383708919748,
+        550.6332418390084
+      ],
+      "prefill_latency_mean_s": 552.8146018290039,
+      "prefill_latency_std_s": 1.6647123739807475,
+      "prefill_throughput_tok_per_s": 0.045223118053117156,
+      "pivot_setup_time_s": 24.521497618989088,
+      "peak_rss_mb": 56.8515625,
+      "num_layers": 32,
+      "step_count": 225,
+      "warmup_runs": 2,
+      "measured_runs": 3
+    }
+  ]
+}

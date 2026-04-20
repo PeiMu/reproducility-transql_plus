@@ -94,6 +94,53 @@ Caching gives a 192× per-call speedup; break-even at 1.22 runs. Correctness ver
 **Analysis**: ExpertFFN (matmul + swiglu + rechunk) and MoeAggregate (weighted sum + rechunk) fully decompose into the 5 categories. However, **TopKRouting requires `ROW_NUMBER() OVER (PARTITION BY act_row ORDER BY val DESC)` + `WHERE rk <= K`** — a ranked window function for top-k selection. This is NOT expressible as any of: (1) matrix multiplication, (2) element-wise functions, (3) element-wise arithmetic, (4) shape manipulation, or (5) normalisation.
 **Decision**: Not implementing MOE operators. The paper's "5 categories cover MOE" claim appears to be an approximation — the routing/gating step requires a genuinely new primitive (top-k ranked selection via window function).
 
+### D12. ClickHouse Backend — Dialect Port
+
+**Paper Section 5**: TranSQL+ is evaluated on both DuckDB and ClickHouse to demonstrate cross-OLAP portability.
+
+**Gap**: The generators in `transql_plus/sql_templates.py`, `postopt.py`, and `runner.py` emit DuckDB-specific SQL. A diagnostic probe (`scripts/probe_clickhouse_sql.py` → `results/clickhouse_sql_probe.json`, server 26.3.9.8) classified every construct the generators use:
+
+| Construct (DuckDB) | Status in ClickHouse | Rewrite |
+|---|---|---|
+| `list_dot_product(a, b)` | workaround | `dotProduct(a, b)` |
+| `list_sum(arr)` | workaround | `arraySum(arr)` |
+| `len(arr)` | workaround | `length(arr)` |
+| `list_transform(v, x -> f(x))` | workaround | `arrayMap(x -> f(x), v)` |
+| `list_transform(generate_series(1, N), i -> f(i))` | workaround | `arrayMap(i -> f(i), range(1, N+1))` |
+| `generate_series(a, b)` (inclusive) | workaround | `range(a, b+1)` (exclusive upper) |
+| `unnest(generate_series(0, N-1))` | workaround | `arrayJoin(range(0, N))` |
+| `array_agg(val ORDER BY k)` | workaround | push `ORDER BY k` into subquery, then `groupArray(val)` over the sorted rows |
+| `FLOAT[N]` (fixed-length array type) | **unsupported** | `Array(Float32)`; enforce length in loader — all rows at a given `chunk_size` have equal length so runtime semantics match |
+| `FLOAT[]` | workaround | `Array(Float32)` |
+| `PIVOT tbl ON k USING first(v)` | **unsupported** | conditional aggregation: `(groupArrayIf(v, k=C))[1] AS c_C` per chunk value |
+| `POSITIONAL JOIN` | **unsupported** | fold neighbour tables into one `SELECT` with multiple computed columns; the join disappears |
+| `CREATE TEMP TABLE t AS SELECT ...` | workaround | `CREATE TEMPORARY TABLE t ENGINE=Memory AS SELECT ...` |
+| `CREATE OR REPLACE TEMP TABLE` | **unsupported** | two statements: `DROP TEMPORARY TABLE IF EXISTS t; CREATE TEMPORARY TABLE t ENGINE=Memory AS ...` |
+| `duckdb_tables()` | workaround | `system.tables WHERE is_temporary = 1` |
+| `CAST(x AS FLOAT)` | workaround | `CAST(x AS Float32)` |
+
+Summary: 12 workaround, 4 unsupported (fixed-length array type, `PIVOT`, `POSITIONAL JOIN`, `CREATE OR REPLACE TEMP TABLE`). All four have deterministic rewrites.
+
+**Implementation**: the frozen DuckDB path (`transql_plus/{sql_templates,postopt,runner}.py`) is left untouched. The ClickHouse variant lives in a parallel subpackage `transql_plus/clickhouse/`:
+
+```
+transql_plus/clickhouse/
+    __init__.py
+    sql_templates_ch.py   # mirror of sql_templates.py, ClickHouse dialect
+    postopt_ch.py         # PIVOT and POSITIONAL JOIN rewrites
+    runner_ch.py          # ClickHouseRunner, same public API as TranSQLRunner
+```
+
+`ClickHouseRunner` exposes the same methods (`init`, `run_prefill`, `run_decode_step`, `get_logits_argmax`, `close`) and applies per-session settings `{max_memory_usage: 16 GiB, max_threads: 4}` to mirror the paper's c7.2xlarge profile (D-Measurement-Protocol). Temporary tables used during prefill/decode use `ENGINE=Memory`; weight tables use `ENGINE=MergeTree() ORDER BY (row_index, chunk_index)`.
+
+Weights are loaded from the existing `weights_csv/` directory via `preprocessing/load_weights_clickhouse.py` — no re-preprocessing.
+
+**Qualified-alias footgun.** Multi-way joins in ClickHouse propagate qualified prefixes (`n.chunk_index`, `e.v`) into the output schema of an unaliased SELECT projection. DuckDB normalises these to bare column names. The first pipeline run hit `DB::Exception: Identifier 'a.chunk_index' cannot be resolved from table with name a … Maybe you meant: ['n.chunk_index']` because a downstream step referenced `a.chunk_index` on a table whose actual column was `n.chunk_index`. Fix: every projected column in the ClickHouse templates has an explicit `AS` alias (`n.chunk_index AS chunk_index`, `e.v AS v`, etc.). This is enforced across `sql_templates_ch.py` and `postopt_ch.py`.
+
+**Smoke test.** `num_layers=1`, `lengths=25`, no warmup: prefill 82.9s (includes one-off D9 weight-pivot cost of 3.0s) and two decode steps at 2.0s / 2.4s. Pipeline runs end-to-end with the 16 GiB / 4-thread envelope — confirms the dialect port, CTE merge, fusion, and pivot rewrites all compose correctly against a real Llama-3-8B layer.
+
+See `results/clickhouse_sql_probe.json` for the raw probe output including the exact error returned by ClickHouse for each `unsupported` construct.
+
 ---
 
 ## Measurement Protocol
