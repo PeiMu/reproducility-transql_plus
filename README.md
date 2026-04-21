@@ -353,9 +353,14 @@ python scripts/run_clickhouse_perplexity.py \
 The paper states "the models used here are unquantized full-precision", so we compare against llama.cpp F32 only (no quantization). **Run llama.cpp under the same 4-core / 16 GB constraint** for an apples-to-apples comparison.
 
 ```bash
-# Build llama.cpp
-cd ~/Project/llama.cpp && mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release && make -j
+# Build llama.cpp — SSE4.2 only (128-bit, no AVX/AVX2)
+# This produces a conservative lower bound for comparison with the paper's
+# AWS c7g.2xlarge (ARM Graviton3, NEON 128-bit).  See "SIMD Matching" below.
+cd ~/Project/llama.cpp && mkdir -p build_sse42 && cd build_sse42
+cmake .. -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_NATIVE=OFF -DGGML_SSE42=ON \
+    -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF \
+    -DGGML_BMI2=OFF -DGGML_AVX512=OFF -DGGML_AVX_VNNI=OFF && make -j
 
 # Convert HuggingFace model to GGUF (F32, unquantized)
 # (e.g., ~/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B/snapshots/8cde5ca8380496c9a6cc7ef3a8b46a0372a1d920/)
@@ -364,6 +369,22 @@ python ~/Project/llama.cpp/convert_hf_to_gguf.py \
     --outtype f32 \
     --outfile ~/Project/llama.cpp/models/llama-3-8b-f32.gguf
 ```
+
+#### SIMD Matching — Why SSE4.2
+
+The paper's AWS c7g.2xlarge uses an **ARM Graviton3** processor (Neoverse V1, ARMv8.4-A) with **NEON SIMD (128-bit, 2× FMA pipelines)**. Our reproduction host has an **Intel Xeon E-2236** with **AVX2 (256-bit, 2× FMA)** — roughly 2× the float32 SIMD throughput per cycle.
+
+There is no x86 SIMD mode that exactly matches ARM NEON's throughput:
+
+| ISA | Float width | FMA | float32 ops/cycle (2 pipes) | vs NEON |
+|---|---|---|---|---|
+| ARM NEON (Graviton3) | 128-bit | yes | 16 | 1.0× |
+| x86 SSE4.2 | 128-bit | **no** | 8 | **0.5×** (slower) |
+| x86 AVX / AVX2 | 256-bit | yes | 32 | 2.0× |
+
+We choose **SSE4.2** as a conservative lower bound: llama.cpp is built with `GGML_AVX=OFF`, and DeepSpeed/PyTorch is capped at runtime via `MKL_CBWR=AVX` (which selects MKL's SSE4.2 code path). This understates native framework performance relative to the paper's ARM hardware — any advantage shown here would also hold on the original setup.
+
+To run with full AVX2 instead, build llama.cpp normally (`cmake .. -DCMAKE_BUILD_TYPE=Release && make -j`) and set `MKL_CBWR=AVX2` (or unset it) for DeepSpeed.
 
 ### Paper-faithful benchmarks (4 cores, 16 GB RAM)
 
@@ -383,7 +404,7 @@ mkdir -p results
 sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
 
 systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
-    ~/Project/llama.cpp/build/bin/llama-bench \
+    ~/Project/llama.cpp/build_sse42/bin/llama-bench \
     -m ~/Project/llama.cpp/models/llama-3-8b-f32.gguf \
     -t 4 -p 25 -n 0 -r 1 --no-warmup \
     -o json > results/llamacpp_f32_cold.json
@@ -393,14 +414,14 @@ systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
 # The decode test is prompt-length-independent in llama-bench's model, so the
 # collector broadcasts the single tg value to every prompt length.
 systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
-    ~/Project/llama.cpp/build/bin/llama-bench \
+    ~/Project/llama.cpp/build_sse42/bin/llama-bench \
     -m ~/Project/llama.cpp/models/llama-3-8b-f32.gguf \
     -t 4 -p 25,50,100,200 -n 50 -r 3 \
     -o json > results/llamacpp_f32_warm.json
 
 # Perplexity (requires wikitext-2-raw/wiki.test.raw, see Setup section)
 systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
-    ~/Project/llama.cpp/build/bin/llama-perplexity \
+    ~/Project/llama.cpp/build_sse42/bin/llama-perplexity \
     -m ~/Project/llama.cpp/models/llama-3-8b-f32.gguf \
     -t 4 -f wikitext-2-raw/wiki.test.raw \
     2>&1 | tee results/llamacpp_f32_ppl.txt
@@ -415,8 +436,8 @@ If `systemd-run` is unavailable (containers, macOS), drop the `systemd-run ... -
 A second inference-framework baseline (v1 `init_inference` API, CPU BF16; DeepSpeed CPU accelerator does not support float16). Mirrors Step 5A's cold/warm protocol — the script does not drop caches itself; the user drops the page cache before the cold run. Same 4-thread / 16 GiB envelope as all other measurements.
 
 ```bash
-# Editable install against the local 0.18.9 checkout
-pip3 install -e /home/pei/Project/DeepSpeed
+# Editable install against the local 0.18.9 checkout (no C++ ops — not used for inference)
+DS_BUILD_OPS=0 ~/anaconda3/envs/llm_db/bin/pip install --no-build-isolation -e /home/pei/Project/DeepSpeed
 
 # --- Cold run (drop page cache, then launch under 16 GiB cgroup) ------
 sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
@@ -435,7 +456,7 @@ systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
     --output results/deepspeed_bf16_warm.json
 ```
 
-One invocation produces both prefill (2 warmup + 3 measured) and decode (2 warmup + 49 measured) numbers at every prompt length. If `systemd-run` is unavailable, drop the `systemd-run ... --` prefix — `--threads 4` (propagated to `torch.set_num_threads` + `OMP_NUM_THREADS`) still pins thread count, but RAM is unconstrained; note that when reporting.
+One invocation produces both prefill (2 warmup + 3 measured) and decode (2 warmup + 49 measured) numbers at every prompt length. The script defaults `MKL_CBWR=AVX` to cap Intel MKL to SSE4.2 code paths (see "SIMD Matching" above). Override on the command line (`MKL_CBWR=AVX2`) to restore full AVX2. If `systemd-run` is unavailable, drop the `systemd-run ... --` prefix — `--threads 4` (propagated to `torch.set_num_threads` + `OMP_NUM_THREADS`) still pins thread count, but RAM is unconstrained; note that when reporting.
 
 ## Step 6: Aggregate and Compare
 

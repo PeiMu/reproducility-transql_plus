@@ -173,6 +173,22 @@ systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- \
 
 **On our 62 GB / 12-core server**: without the constraint flags, measurements would reflect a much more generous memory/compute regime than the paper's 4-core/16 GB setup. Always pass them when reproducing published numbers.
 
+### SIMD Matching
+
+**Paper's hardware** (c7g.2xlarge): ARM Graviton3 (Neoverse V1, ARMv8.4-A), **NEON 128-bit SIMD with 2× FMA pipelines** (~16 float32 ops/cycle at 2.5 GHz).
+
+**Our hardware** (Intel Xeon E-2236): x86_64 with **AVX2 256-bit SIMD with 2× FMA** (~32 float32 ops/cycle at 3.4 GHz).
+
+No x86 SIMD mode matches ARM NEON's throughput: SSE4.2 is 128-bit but lacks FMA (~8 float32 ops/cycle — slower than NEON); AVX/AVX2 are 256-bit with FMA (2× NEON throughput).
+
+**Decision**: cap both baselines to **SSE4.2** (128-bit, no FMA) as a conservative lower bound. Any advantage native frameworks show at SSE4.2 would also hold — and be larger — on the paper's ARM hardware.
+
+- **llama.cpp**: built with `GGML_NATIVE=OFF GGML_SSE42=ON GGML_AVX=OFF GGML_AVX2=OFF GGML_FMA=OFF GGML_F16C=OFF` (build dir: `build_sse42/`).
+- **DeepSpeed/PyTorch**: `MKL_CBWR=AVX` caps Intel oneMKL to SSE4.2 code paths at runtime (MKL has no AVX1-only kernel, so `MKL_CBWR=AVX` falls through to SSE4.2). Set as default in `scripts/run_deepspeed.py`.
+- **DuckDB / ClickHouse**: use whatever SIMD the host provides; these systems run their own vectorized engines and are not capped — both the SSE4.2 baseline and the uncapped TranSQL+ see the same host SIMD for DB-internal operations.
+
+When reporting, state the SIMD mode. To restore full AVX2, rebuild llama.cpp normally and set `MKL_CBWR=AVX2` (or unset) for DeepSpeed.
+
 ### Warmup Analysis
 **AQP_middleware bug**: `run_prefill.py` does `--repeat 3` with NO warmup — run 1 hits cold DuckDB page cache (weight pages not yet in buffer pool), inflating the reported mean.
 **llama-bench**: Internally does 5 warmup iterations (hardcoded in llama.cpp source) before measuring `-r 3` runs.

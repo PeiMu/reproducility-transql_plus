@@ -40,9 +40,13 @@ import os
 import resource
 import time
 
-# IMPORTANT: thread-count env vars must be set before torch imports.
+# IMPORTANT: thread-count and SIMD env vars must be set before torch imports.
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", "4")
+# Cap MKL to SSE4.2 code paths (no AVX/AVX2) for SIMD-matched comparison
+# with the paper's AWS c7g.2xlarge (ARM NEON, 128-bit).  Set
+# MKL_CBWR=AVX2 on the command line to restore full AVX2.
+os.environ.setdefault("MKL_CBWR", "AVX")
 
 import numpy as np                       # noqa: E402
 import torch                             # noqa: E402
