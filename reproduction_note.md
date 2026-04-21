@@ -185,7 +185,10 @@ No x86 SIMD mode matches ARM NEON's throughput: SSE4.2 is 128-bit but lacks FMA 
 
 - **llama.cpp**: built with `GGML_NATIVE=OFF GGML_SSE42=ON GGML_AVX=OFF GGML_AVX2=OFF GGML_FMA=OFF GGML_F16C=OFF` (build dir: `build_sse42/`).
 - **DeepSpeed/PyTorch**: `MKL_CBWR=AVX` caps Intel oneMKL to SSE4.2 code paths at runtime (MKL has no AVX1-only kernel, so `MKL_CBWR=AVX` falls through to SSE4.2). Set as default in `scripts/run_deepspeed.py`.
-- **DuckDB / ClickHouse**: use whatever SIMD the host provides; these systems run their own vectorized engines and are not capped — both the SSE4.2 baseline and the uncapped TranSQL+ see the same host SIMD for DB-internal operations.
+- **DuckDB**: already SSE-only — binary analysis of the pip wheel (`_duckdb.cpython-314-x86_64-linux-gnu.so`, 58 MB) shows 297,885 `xmm` instructions and zero `ymm` / `zmm` instructions. No capping needed.
+- **ClickHouse**: cannot be capped. Binary analysis of the official Docker image (`clickhouse/clickhouse-server:26.3.9.8`, 748 MB) shows 351,618 `ymm` (AVX2) + 250,754 `zmm` (AVX-512) + 272,094 `xmm` (SSE) instructions. The base compilation uses `-march=x86-64-v2` (AVX2 mandatory) — AVX2 is baked into the baseline code, not just runtime-dispatched kernels. No runtime flag, env var, or CPUID masking can disable it without rebuilding from source.
+
+**Fairness implications**: the DuckDB comparison is fair (both DuckDB and baselines run at 128-bit SSE). The ClickHouse comparison is not: ClickHouse uses AVX2 (256-bit) while the baselines are capped to SSE4.2 (128-bit, no FMA). ClickHouse therefore has a ~2× SIMD throughput advantage over the baselines that it would not have on the paper's ARM hardware. When reporting ClickHouse numbers, note this asymmetry — the baseline numbers are conservative lower bounds.
 
 When reporting, state the SIMD mode. To restore full AVX2, rebuild llama.cpp normally and set `MKL_CBWR=AVX2` (or unset) for DeepSpeed.
 
