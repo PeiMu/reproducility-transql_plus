@@ -59,7 +59,7 @@ def expand_node(node: TensorDagNode) -> SqlSteps:
                                _int(node, "head_dim"),
                                _int(node, "chunk_size"))
         case TensorOpType.Softmax:
-            return softmax_sql(inp[0], out)
+            return softmax_sql(inp[0], out, stable=True)
         case TensorOpType.AttnVMul:
             return attn_vmul_sql(inp[0], inp[1], out,
                                  _int(node, "num_q_heads"),

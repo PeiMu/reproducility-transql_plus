@@ -362,7 +362,7 @@ class ClickHouseRunner:
                                      self.config.chunk_size))
 
     def _exec_softmax(self, inp: str, out: str) -> None:
-        self._exec_steps(softmax_sql(inp, out))
+        self._exec_steps(softmax_sql(inp, out, stable=True))
 
     def _exec_attn_vmul(self, attn: str, v: str, out: str) -> None:
         self._exec_steps(attn_vmul_sql(attn, v, out,

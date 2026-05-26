@@ -417,7 +417,7 @@ class TranSQLRunner:
 
     def _exec_softmax(self, inp: str, out: str) -> None:
         from .sql_templates import softmax_sql
-        for sql, name in softmax_sql(inp, out):
+        for sql, name in softmax_sql(inp, out, stable=True):
             self._exec_step(sql, name)
 
     def _exec_attn_vmul(self, attn: str, v: str, out: str) -> None:
