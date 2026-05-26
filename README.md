@@ -555,6 +555,81 @@ tests/                  # 49 tests
   test_runner.py        # Runner: prefill, pivot caching, JSON topology
 ```
 
+## Verifying Generated SQL Against the Paper
+
+Run `demo_sql_generation.py` to print every SQL template, post-optimization rewrite, and a full end-to-end prefill on synthetic data:
+
+```bash
+conda activate llm_db
+python demo_sql_generation.py
+```
+
+No model weights are needed — the script creates tiny synthetic data (hidden_dim=4, chunk_size=2, 1 layer, 3 tokens) and runs everything in-memory via DuckDB.
+
+### What it prints
+
+**Part 1 — SQL templates for all 9 operators (Paper Table 1, §3.2.1):**
+
+Each operator is printed with its generated SQL and the corresponding paper reference. The mapping between the paper's abstract notation and the DuckDB implementation:
+
+| Paper Table 1 | Code (DuckDB) | SQL Pattern |
+|---|---|---|
+| **Matrix Multiplication** `SELECT A.m, B.q, SUM(DOT(A.chunk, B.chunk)) FROM A JOIN B ON A.n=B.p GROUP BY A.m, B.q` | `matmul_sql()` | `SUM(list_dot_product(a.v, w.v))` + re-chunk via `array_agg(val ORDER BY out_col)` |
+| **Element-wise Function** `SELECT A.m, A.n, 1/(1+exp(-A.chunk)) FROM A` | `swiglu_sql()` | `list_transform(... i -> (g.v[i] / (1.0 + exp(-g.v[i]))) * u.v[i])` (SiLU × up) |
+| **Element-wise Arithmetic** `SELECT A.m, A.n, A.chunk + B.chunk FROM A JOIN B ON A.m=B.p AND A.n=B.q` | `residual_add_sql()` | `list_transform(... i -> a.v[i] + b.v[i])` with JOIN on `(row_index, chunk_index)` |
+| **Reshape** `SELECT A.m*M+A.n, A.chunk FROM A` | (implicit) | Handled by re-chunk `GROUP BY out_col - (out_col % chunk_size)` in matmul/attn steps |
+| **Normalization (Softmax)** `WITH exp_sum AS (SELECT A.m, SUM(exp(A.chunk)) ...) SELECT exp(.)/summation` | `softmax_sql()` | 2-step: `SUM(exp(score))` then `exp(score)/summation` (Decision D5) |
+| **Normalization (RMSNorm)** `Normalize_{sq, SUM, rms_scale}` | `rmsnorm_sql()` | 2-step: `SUM(x*x)` then `x/sqrt(mean_sq + eps) * gamma` |
+
+Additional operators not in Table 1 but required for the Llama3 architecture:
+
+| Operator | Notes |
+|---|---|
+| **Embedding Lookup** (`embed_lookup_sql`) | §3.2.2 — equi-join on `token_id = row_index` |
+| **RoPE** (`rope_sql`) | Decision D2 — single step combining elem-wise arithmetic + reshape |
+| **QK Attention** (`qk_attn_sql`) | MatMul variant with GQA mapping + causal mask (Decision D4) |
+| **Attention × V** (`attn_vmul_sql`) | MatMul variant — expand V to scalar, weighted sum, re-chunk |
+
+**Part 2 — Post-optimization SQL (Paper §4):**
+
+| Optimization | Paper | Generated SQL |
+|---|---|---|
+| **§4.2 QKV Fusion** | UNION ALL with flag column | `SELECT ... 'Q' AS flag FROM q_proj UNION ALL ... 'K' ... UNION ALL ... 'V'` → single fused dot-product → re-chunk with `CASE flag WHEN ...` |
+| **§4.2 Gate+Up Fusion** | Same pattern, flags `'G'`/`'U'` | Identical structure, two projections |
+| **§4.3 ROW2COL Pivot** | `PIVOT` → `CROSS JOIN` → `POSITIONAL JOIN` | `PIVOT ... ON chunk_index IN (0, 2) USING first(v)` → `CROSS JOIN` with `list_dot_product(a."0", w."0")` → `POSITIONAL JOIN` reduction |
+
+**Part 3 — Full DAG baseline vs post-optimized (1 layer):**
+
+Shows the complete SQL step list for one transformer layer:
+- **Baseline**: 34 SQL steps (each creates a temp table)
+- **Post-optimized**: 8 SQL steps (CTE merge wraps non-critical intermediates into `WITH ... AS` blocks; table fusion reduces 3 MatMuls to 1)
+
+This demonstrates §4.1 Algorithm 2 (Temporary View Elimination) reducing materialized tables from 34 to 8.
+
+**Part 4 — End-to-end prefill execution:**
+
+Runs the full 34-step baseline pipeline on synthetic data, loads the logits table, and prints the greedy argmax prediction. Verifies the SQL pipeline executes correctly end-to-end.
+
+### Verifying against the paper
+
+The script prints a comparison table at the end. Key points to check:
+
+1. **MatMul structure**: paper's `SUM(DOT(A.chunk, B.chunk))` maps to `SUM(list_dot_product(a.v, w.v))` — same join-on-chunk, group-by-free-dims pattern.
+2. **Softmax**: paper's 2-step `exp/SUM/div` pattern reproduced exactly (Decision D5). The code also provides a stable 4-step variant (subtract max first) not in the paper.
+3. **Table fusion**: paper's flag-column approach (`'Q'`/`'K'`/`'V'`) reproduced verbatim.
+4. **ROW2COL**: paper's `PIVOT → CROSS JOIN → POSITIONAL JOIN` pipeline reproduced with DuckDB syntax.
+5. **CTE merging**: Algorithm 2's "critical node" materialisation reproduced — shared nodes (consumed by multiple downstream ops) are materialized; others become CTEs.
+
+### Unit tests (NumPy reference comparison)
+
+For numerical verification of each operator against a NumPy reference:
+
+```bash
+python -m pytest tests/test_sql_templates.py -v
+```
+
+Each test creates synthetic data, runs the SQL template in DuckDB, and compares the result against a NumPy implementation of the same operation (tolerance: atol=1e-4, rtol=1e-4).
+
 ## Design Decisions
 
 All design decisions are documented in:
