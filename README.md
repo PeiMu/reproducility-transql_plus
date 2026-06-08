@@ -2,6 +2,19 @@
 
 Independent reproduction of the TranSQL+ paper: running LLM inference entirely inside a relational database. Primary backend is DuckDB; Step 4B ports the same SQL pipeline to ClickHouse (paper-portability claim). Step 5 adds two native-inference baselines (llama.cpp, DeepSpeed).
 
+## Reproduction vs Paper: Key Results
+
+Llama3-8B prefill latency (prompt length = 25, warm runs):
+
+| System | Paper (s) | Ours (s) | Notes |
+|---|---|---|---|
+| TranSQL+ (DuckDB) | ~10 | 149.3 | ~15× slower than paper claims |
+| TranSQL+ (ClickHouse) | ~30 | 560.8 | ~19× slower than paper claims |
+| DeepSpeed | ~240 | 4.5 | ~53× faster than paper claims |
+| llama.cpp | ~220 | 5.4 | ~41× faster than paper claims |
+
+The paper claims TranSQL+ is competitive with native inference frameworks. Our reproduction finds the opposite: TranSQL+ (DuckDB) is ~33× slower than llama.cpp and ~33× slower than DeepSpeed on the same hardware constraints (4 threads, 16 GB RAM). The paper's baseline numbers for DeepSpeed and llama.cpp appear anomalously slow — possibly due to misconfiguration or a different measurement methodology. See `reproduction_note.md` for detailed analysis.
+
 ## Setup
 
 ```bash
