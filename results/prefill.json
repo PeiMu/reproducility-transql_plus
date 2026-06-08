@@ -15,15 +15,15 @@
     {
       "prompt_length": 25,
       "prefill_latencies_s": [
-        149.69370577298105,
-        150.27250190696213,
-        147.94967433298007
+        149.0950031541288,
+        149.090712856967,
+        149.74815504672006
       ],
-      "prefill_latency_mean_s": 149.30529400430774,
-      "prefill_latency_std_s": 0.9872621270111244,
-      "prefill_throughput_tok_per_s": 0.16744215378778668,
-      "pivot_setup_time_s": 122.93876320996787,
-      "peak_rss_mb": 18752.82421875,
+      "prefill_latency_mean_s": 149.31129035260528,
+      "prefill_latency_std_s": 0.30891495311323763,
+      "prefill_throughput_tok_per_s": 0.1674354293031785,
+      "pivot_setup_time_s": 91.37788454489782,
+      "peak_rss_mb": 19497.77734375,
       "num_layers": 32,
       "step_count": 225,
       "warmup_runs": 2,
