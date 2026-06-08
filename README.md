@@ -13,7 +13,7 @@ Llama3-8B prefill latency (prompt length = 25, warm runs):
 | DeepSpeed | ~240 | 4.5 | ~53× faster than paper claims |
 | llama.cpp | ~220 | 5.4 | ~41× faster than paper claims |
 
-The paper claims TranSQL+ is competitive with native inference frameworks. Our reproduction finds the opposite: TranSQL+ (DuckDB) is ~33× slower than llama.cpp and ~33× slower than DeepSpeed on the same hardware constraints (4 threads, 16 GB RAM). The paper's baseline numbers for DeepSpeed and llama.cpp appear anomalously slow — possibly due to misconfiguration or a different measurement methodology. See `reproduction_note.md` for detailed analysis.
+The paper reports that TranSQL+ is competitive with native inference frameworks. Our reproduction finds the opposite: TranSQL+ (DuckDB) is ~33× slower than llama.cpp and ~33× slower than DeepSpeed on the same hardware constraints (4 threads, 16 GB RAM).
 
 ## Setup
 
