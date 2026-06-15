@@ -27,6 +27,17 @@ pip3 install -e .
 hf auth login
 ```
 
+### Setup Umbra
+```bash
+docker run -it -v umbra-db:/var/db umbradb/umbra:latest umbra-sql -createdb /var/db/transql.db
+
+docker run -d --name transql_umbra --network=host     -v umbra-db:/var/db     --ulimit nofile=1048576:1048576     --ulimit memlock=8388608:8388608     umbradb/umbra:latest     umbra-server --address 0.0.0.0     --port 15432 /var/db/transql.db
+> ALTER USER postgres PASSWORD 'umbra';
+> \q
+
+PGPASSWORD=umbra psql -h localhost -p 15432 -U postgres -c "SELECT 1;"
+```
+
 ### Download Llama3-8B
 
 Accept the license at https://huggingface.co/meta-llama/Meta-Llama-3-8B, then:
@@ -87,6 +98,10 @@ python preprocessing/load_weights_duckdb.py \
     --csv-dir weights_csv \
     --db-path weights.duckdb \
     --chunk-size 32
+
+# Load CSV into Umbra
+python -m preprocessing.load_weights_umbra \
+    --csv-dir weights_csv --num-layers 32
 ```
 
 Optional: copy to RAM for faster I/O:
@@ -216,6 +231,14 @@ python scripts/run_perplexity.py \
     --pivot-width 32 --subquery-width 4
 ```
 
+### Smoke test for Umbra
+```bash
+python scripts/run_umbra_prefill.py \
+    --prompts-dir prompts --output results/umbra_prefill.json \
+    --num-layers 1 --lengths 25 --warmup 1 \
+    --repeat 1
+```
+
 ## Step 4: Full Benchmarks (32 layers)
 
 The paper runs on **AWS c7.2xlarge: 4 physical cores, 16 GB RAM**, explicitly targeting "memory-constrained conditions" with DuckDB's out-of-core execution. To reproduce faithfully on a larger host, constrain DuckDB:
@@ -267,6 +290,13 @@ python scripts/run_perplexity.py \
     --max-chunks 64 \
     --memory-limit 16GB --threads 4 \
     --temp-directory ./duckdb_tmp
+```
+
+### Prefill and Decode for Umbra
+```bash
+python scripts/run_umbra_prefill.py --prompts-dir prompts --output results/umbra_prefill.json
+
+python scripts/run_umbra_decode.py --prompts-dir prompts --output results/umbra_decode.json
 ```
 
 ### Baseline comparison (without ROW2COL pivot)
